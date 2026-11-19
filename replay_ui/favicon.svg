@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="ukiyo">
+  <rect x="0.5" y="0.5" width="23" height="23" rx="5" fill="#101828"/>
+  <g transform="translate(4.080 4.080) scale(0.660)">
+    <path d="M 12 3.5 V 20.5" stroke="#F2F4F7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <path d="M 2.5 7 L 8.5 7 L 8.5 17 L 2.5 17 Z" fill="#F2F4F7" stroke="none"/>
+  <path d="M 15.5 7 L 21.5 7 L 21.5 17 L 15.5 17 Z" stroke="#F2F4F7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  </g>
+</svg>

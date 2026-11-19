@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>浮世 Ukiyo · 诱捕回放</title>
+<script>
+/* 主题防闪：CSS 生效前定调。只有黑/白两套，localStorage 持久化，默认白（浅色）。
+   ukiyo-replay-theme.v2 是一次性迁移标记：老用户存的 dark 是旧默认而非主动选择，
+   用标记迁到新的浅色默认；迁过一次后完全尊重用户自己点选。 */
+(function () {
+  var t = 'light';
+  try {
+    var s = localStorage.getItem('ukiyo-replay-theme');
+    if (localStorage.getItem('ukiyo-replay-theme.v2') !== '1') {
+      localStorage.setItem('ukiyo-replay-theme.v2', '1');
+      s = null;
+    }
+    t = s === 'dark' ? 'dark' : 'light';
+  } catch (e) {}
+  document.documentElement.setAttribute('data-theme', t);
+})();
+</script>
+<link rel="stylesheet" href="replay.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- ============ 左栏：run / 会话列表 / 主题 ============ -->
+  <aside class="side card">
+    <div class="brand">
+      <span class="brand-name">浮世 <span class="brand-en">Ukiyo</span></span>
+      <span id="ver" class="ver" hidden></span>
+    </div>
+    <div class="brand-sub">诱捕回放 · 只读 · 仅 127.0.0.1</div>
+
+    <label class="fld-label" for="run-select">账本（run）</label>
+    <select id="run-select" class="select"></select>
+    <div id="run-stats" class="run-stats" aria-live="polite"></div>
+
+    <div id="filters" class="filters" role="group" aria-label="按判定筛选会话"></div>
+
+    <div class="sess-head">
+      <span>会话</span><span id="sess-count" class="sess-count"></span>
+    </div>
+    <div id="sess-list" class="sess-list" role="listbox" aria-label="会话列表" tabindex="0"></div>
+
+    <div class="theme-switch" role="group" aria-label="主题切换（仅黑 / 白两套）">
+      <button type="button" id="theme-dark" class="theme-btn" aria-pressed="false">● 黑</button>
+      <button type="button" id="theme-light" class="theme-btn" aria-pressed="true">○ 白</button>
+    </div>
+  </aside>
+
+  <!-- ============ 主区 ============ -->
+  <main class="main">
+    <div id="err-banner" class="err-banner" hidden>
+      <span id="err-msg"></span>
+      <button type="button" id="err-retry" class="btn btn-sm">重试</button>
+    </div>
+
+    <div id="empty-main" class="empty-main">
+      <div class="empty-title">选一个会话，看它信到第几层</div>
+      <div class="empty-sub">左侧是 runs/ 里的真实账本。判定由蜜罐同一份 server_verdict 从账本复算，不另写一套。</div>
+    </div>
+
+    <div id="detail" hidden>
+      <header class="head card">
+        <div class="head-top">
+          <div id="verdict-badge" class="verdict-badge">
+            <span id="verdict-dot" class="dot"></span>
+            <span id="verdict-zh" class="verdict-zh"></span>
+            <span id="verdict-pos" class="verdict-pos" hidden>回放位置</span>
+          </div>
+          <div id="head-meta" class="head-meta"></div>
+          <div class="head-tabs" role="tablist" aria-label="视图">
+            <button type="button" role="tab" id="tab-replay" class="tab" aria-selected="true">回放</button>
+            <button type="button" role="tab" id="tab-dossier" class="tab" aria-selected="false">档案</button>
+          </div>
+        </div>
+
+        <div id="ladder" class="ladder" aria-label="信任阶梯（点 rung 跳到解锁事件）"></div>
+
+        <div id="stats" class="stats"></div>
+        <div id="ident" class="ident"></div>
+      </header>
+
+      <!-- 回放视图 -->
+      <div id="replay-view" class="cols">
+        <section class="col-left" aria-label="事件时间线">
+          <div class="toolbar glass">
+            <button type="button" id="btn-reset" class="btn btn-icon" title="回到起点（Home）" aria-label="回到起点">⏮</button>
+            <button type="button" id="btn-prev" class="btn btn-icon" title="上一步（←）" aria-label="上一步">◀</button>
+            <button type="button" id="btn-play" class="btn btn-play" title="播放 / 暂停（空格）" aria-label="播放">▶</button>
+            <button type="button" id="btn-next" class="btn btn-icon" title="下一步（→）" aria-label="下一步">▶▏</button>
+            <label class="speed-label" for="speed">速度</label>
+            <select id="speed" class="select select-sm">
+              <option value="1">1×</option>
+              <option value="4" selected>4×</option>
+              <option value="16">16×</option>
+            </select>
+            <input type="range" id="scrub" class="scrub" min="-1" max="0" value="0" step="1"
+                   aria-label="回放进度">
+            <span id="cursor-label" class="cursor-label mono"></span>
+          </div>
+          <ol id="timeline" class="timeline"></ol>
+        </section>
+
+        <section class="col-right" aria-label="归因与转折">
+          <div class="card chain-card">
+            <h2 class="card-title">归因链 · 我怎么把它骗到那里的</h2>
+            <div id="chain-links" class="chain-links"></div>
+            <div id="chain-banner" class="chain-banner"></div>
+            <ol id="chain" class="chain"></ol>
+          </div>
+          <div class="card turns-card">
+            <h2 class="card-title">转折点</h2>
+            <ol id="turns" class="turns"></ol>
+          </div>
+        </section>
+      </div>
+
+      <!-- 档案视图 -->
+      <div id="dossier-view" class="card dossier" hidden></div>
+    </div>
+  </main>
+</div>
+
+<div id="live" class="sr-only" role="status" aria-live="polite"></div>
+<script src="replay.js"></script>
+</body>
+</html>
