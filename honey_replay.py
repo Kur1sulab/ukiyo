@@ -303,7 +303,12 @@ def verdict_progression(events: list[dict], sid: str) -> tuple[list[dict], str]:
 
 
 def _ident_of(e: dict) -> dict:
-    args = e.get("args") or {}
+    # 带外 token（dns/aws/mcp）的 canary 事件不走 /c/ 的 args 形状：
+    # 它们的证据字段（qname / tool / action）直接摊在事件上。这里只认 dict，
+    # 别让一个字符串把整条归因链打断。
+    args = e.get("args")
+    if not isinstance(args, dict):
+        args = {}
     return {k: args[k] for k in IDENT_KEYS if args.get(k)}
 
 
@@ -510,7 +515,9 @@ def run_stats(run: dict) -> dict:
 # ----------------------------------------------------------------------
 STATIC = {"index.html": "text/html; charset=utf-8",
           "replay.css": "text/css; charset=utf-8",
-          "replay.js": "text/javascript; charset=utf-8"}
+          "replay.js": "text/javascript; charset=utf-8",
+          "artex.css": "text/css; charset=utf-8",
+          "artex-ukiyo.css": "text/css; charset=utf-8"}
 SID_PAT = r"(?:[0-9a-f]{16}|\([a-z0-9-]+-unattributed\))\Z"
 
 

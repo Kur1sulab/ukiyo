@@ -23,5 +23,13 @@ jobs:
       - name: 账本重放自测
         run: python3 _selftest_verdict_replay.py
 
+      # 带外 token 必须证明「零出站」：DNS/AWS/MCP 三面只在本地触发，
+      # NoEgressGuard 拦住 connect/create_connection/getaddrinfo 并断言 0 次尝试。
+      - name: 带外 token 自测（DNS / AWS / MCP，零出站）
+        run: python3 _selftest_oob.py
+
+      - name: 显式 allowlist + 噪声预算自测
+        run: python3 _selftest_allowlist.py
+
       - name: 对抗性自审（期望 P0=0 P1=0 P2=0）
         run: python3 audit.py
