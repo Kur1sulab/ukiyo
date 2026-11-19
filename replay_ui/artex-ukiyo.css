@@ -1,0 +1,527 @@
+/* ============================================================================
+   AR TEX · 乌有 Ukiyo 诱捕回放 桥接层（v1.0）
+   ----------------------------------------------------------------------------
+   职责：把 replay.css 自己的令牌（--bg/--panel/--line/--ok/--r-card/--font）
+         钉到 AR TEX 的零彩度色板（统一 dark），拆掉毛玻璃与投影，
+         再接上 artex.css 的机甲装饰钩子。
+   纪律：只改写令牌与装饰，不动布局结构、不动交互、不动 JS。
+   范围：仅本目录的只读回放控制台；18080 的诱饵页（AD Backup Export）
+         不加载本文件，必须维持第三方产品原貌。
+   加载：位于 replay.css 之后、artex.css 之前（artex.css 负责装饰与基座）。
+   ========================================================================== */
+
+/* ------------------------------------------------------------ 令牌钉装
+   两套主题（黑/白）全部收敛到 AR TEX dark：切换按钮仍然存在（JS 未改），
+   但视觉恒定，避免出现"选了白却是暗色"的自相矛盾。 */
+:root,
+:root[data-theme="dark"],
+:root[data-theme="light"] {
+  color-scheme: dark;
+
+  /* 底 / 面 */
+  --bg: var(--a-bg, #0a0a0a);
+  --panel: var(--a-panel, #141414);
+  --panel-2: var(--a-panel-2, #1a1a1a);
+
+  /* 线 */
+  --line: var(--a-line, #262626);
+  --line-strong: var(--a-line-2, #383838);
+
+  /* 字 */
+  --text: var(--a-fg, #ededed);
+  --muted: var(--a-muted, #8a8a8a);
+  --faint: var(--a-faint, #6b6b6b);
+  --future: #787878;          /* 未回放事件：仍可读（对 panel ≈4.3:1），靠明度后退 */
+
+  /* 主色：AR TEX 里没有"品牌色"，实心一律用墨色 */
+  --primary: var(--a-ink, #ededed);
+  --on-primary: var(--a-ink-fg, #0a0a0a);
+
+  /* 语义：只留明度差 + 唯一允许的危险红 */
+  --ok: var(--a-ok, #ededed);
+  --warn: var(--a-warn, #c4c4c4);
+  --bad: var(--a-danger, oklch(0.637 0.208 25.331));
+
+  /* 极淡判定底：中性灰，只有 bad 带红 */
+  --tint-ok: var(--a-panel-2, #1a1a1a);
+  --tint-warn: var(--a-panel-2, #1a1a1a);
+  --tint-bad: color-mix(in oklab, var(--a-danger, #e5484d) 10%, var(--a-panel, #141414));
+  --edge-ok: var(--a-line-2, #383838);
+  --edge-warn: var(--a-line-2, #383838);
+  --edge-bad: color-mix(in oklab, var(--a-danger, #e5484d) 42%, transparent);
+
+  /* 玻璃与光影：全部实心化 / 归零 */
+  --glass: var(--a-surface, #0f0f0f);
+  --highlight: 0 0 0 0 transparent;
+  --shadow: 0 0 0 0 transparent;
+
+  /* 结构：大圆角收成机甲取向 */
+  --r-card: var(--a-r, 10px);
+  --r-ctrl: var(--a-r-sm, 6px);
+  --r-pill: 999px;
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px;
+  --sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
+
+  /* 字体与节奏 */
+  --font: -apple-system, "SF Pro Text", "Helvetica Neue", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo,
+          Consolas, "Liberation Mono", monospace;
+  --dur: var(--a-dur, 160ms);
+  --ease: cubic-bezier(.2, .7, .3, 1);
+}
+
+/* ------------------------------------------ 拆毛玻璃 / 去投影 / 收圆角 */
+html[data-artex] body * {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+html[data-artex] body .card,
+html[data-artex] body .head,
+html[data-artex] body .toolbar,
+html[data-artex] body .step,
+html[data-artex] body .dossier code {
+  box-shadow: none !important;
+}
+
+/* 卡片：AR TEX 隐形描边（内描边而非投影） */
+html[data-artex] body .card {
+  background: var(--a-panel, #141414);
+  border: 1px solid transparent !important;
+  border-radius: var(--a-r, 10px);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--a-line, #262626) 55%, transparent) !important;
+  transition: box-shadow var(--a-dur, 160ms) ease;
+}
+html[data-artex] body .card:hover {
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--a-line, #262626) 40%, var(--a-fg, #ededed)) !important;
+}
+
+/* 顶栏（header.head）：实底，去掉卡片内描边 */
+html[data-artex] body .head {
+  background: var(--a-bg, #0a0a0a) !important;
+  border-radius: var(--a-r, 10px);
+}
+
+/* ------------------------------------- 装饰 1 · 24px 仪表网格（内容区） */
+html[data-artex] body {
+  background-image:
+    linear-gradient(to right, color-mix(in oklab, var(--a-line, #262626) 60%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in oklab, var(--a-line, #262626) 60%, transparent) 1px, transparent 1px) !important;
+  background-size: 24px 24px !important;
+  background-attachment: fixed !important;
+  font-variant-numeric: tabular-nums;
+}
+
+/* -------------------------------- 装饰 2 · 顶栏 45° 铭牌条纹 + 极淡基线 */
+html[data-artex] body .head { position: relative; overflow: hidden; }
+html[data-artex] body .head::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 96px;
+  height: 3px;
+  background-image: repeating-linear-gradient(45deg, var(--a-fg, #ededed) 0 5px, transparent 5px 11px);
+  opacity: 0.4;
+  pointer-events: none;
+  z-index: 1;
+}
+html[data-artex] body .head::after,
+html[data-artex] body .toolbar::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: var(--a-line, #262626);
+  opacity: 0.7;
+  pointer-events: none;
+}
+/* 工具条是浮层：只留底部基线，不挂铭牌条纹（会和播放键打架） */
+html[data-artex] body .toolbar { overflow: hidden; }
+
+/* 左栏品牌：顶栏同款铭牌条纹（贴 brand 行下沿） */
+html[data-artex] body .brand { position: relative; padding-bottom: 9px; }
+html[data-artex] body .brand::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 64px;
+  height: 2px;
+  background-image: repeating-linear-gradient(45deg, var(--a-fg, #ededed) 0 5px, transparent 5px 11px);
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+/* ------------------------------------- 装饰 3 · 卡片 12px 角标括号 */
+html[data-artex] body .card { position: relative; }
+html[data-artex] body .card > * { position: relative; z-index: 0; }
+html[data-artex] body .chain-card::before,
+html[data-artex] body .chain-card::after,
+html[data-artex] body .turns-card::before,
+html[data-artex] body .turns-card::after,
+html[data-artex] body .side::before,
+html[data-artex] body .side::after {
+  content: "";
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-color: var(--a-fg, #ededed);
+  border-style: solid;
+  opacity: 0.18;
+  transition: opacity var(--a-dur, 160ms) ease;
+  pointer-events: none;
+  z-index: 2;
+}
+html[data-artex] body .chain-card::before,
+html[data-artex] body .turns-card::before,
+html[data-artex] body .side::before {
+  top: -1px; left: -1px; border-width: 1px 0 0 1px;
+}
+html[data-artex] body .chain-card::after,
+html[data-artex] body .turns-card::after,
+html[data-artex] body .side::after {
+  right: -1px; bottom: -1px; border-width: 0 1px 1px 0;
+}
+html[data-artex] body .chain-card:hover::before,
+html[data-artex] body .chain-card:hover::after,
+html[data-artex] body .turns-card:hover::before,
+html[data-artex] body .turns-card:hover::after,
+html[data-artex] body .side:hover::before,
+html[data-artex] body .side:hover::after { opacity: 0.55; }
+
+/* 分区标题：// 前缀 + 编号式排版 */
+html[data-artex] body .card-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--a-fg, #ededed);
+  margin: 0 0 var(--a-gap, 12px);
+}
+html[data-artex] body .card-title::before {
+  content: "// ";
+  font-family: var(--a-mono, monospace);
+  color: var(--a-muted, #8a8a8a);
+  opacity: 0.7;
+}
+
+/* ------------------------------------- 装饰 4 · 实心按钮 8px 切角 */
+/* 注意：.btn-play 同时带 .btn，故用两段类名压过下面的描边规则 */
+html[data-artex] body .btn.btn-play {
+  background: var(--a-ink, #ededed);
+  color: var(--a-ink-fg, #0a0a0a);
+  border: 1px solid var(--a-ink, #ededed);
+  border-radius: var(--a-r-sm, 6px) !important;
+  font-family: var(--a-mono, monospace);
+  letter-spacing: 0.04em;
+  clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px));
+}
+html[data-artex] body .btn.btn-play.playing {
+  background: transparent;
+  color: var(--a-fg, #ededed);
+  border-color: var(--a-line-2, #383838);
+}
+/* 其余次按钮：纯描边，无位移 */
+html[data-artex] body .btn {
+  background: transparent;
+  border: 1px solid var(--a-line-2, #383838);
+  border-radius: var(--a-r-sm, 6px) !important;
+  color: var(--a-fg, #ededed);
+  font-family: var(--a-mono, monospace);
+  font-size: 11px;
+  transition: background var(--a-dur, 160ms) ease, border-color var(--a-dur, 160ms) ease;
+}
+html[data-artex] body .btn:hover {
+  transform: none;
+  background: var(--a-hover, rgba(255, 255, 255, .05));
+  border-color: var(--a-fg, #ededed);
+}
+html[data-artex] body .btn:active { transform: none; }
+/* 实心键的 hover 必须压过后面的通用描边 hover（同权重，靠顺序+双类名） */
+html[data-artex] body .btn.btn-play:hover {
+  background: var(--a-ink, #ededed);
+  border-color: var(--a-ink, #ededed);
+  opacity: 0.86;
+}
+html[data-artex] body .btn.btn-play.playing:hover {
+  background: var(--a-hover, rgba(255, 255, 255, .05));
+  border-color: var(--a-fg, #ededed);
+  opacity: 1;
+}
+html[data-artex] body .btn:disabled,
+html[data-artex] body .btn[disabled] {
+  background: transparent !important;
+  border-color: var(--a-line, #262626) !important;
+  color: var(--a-muted, #8a8a8a) !important;
+  opacity: 1;
+  cursor: not-allowed;
+}
+
+/* ---------------------------------- 装饰 5 · 输入框左侧 2px 竖线导轨 */
+html[data-artex] body .select,
+html[data-artex] body select {
+  background: var(--a-bg, #0a0a0a);
+  color: var(--a-fg, #ededed);
+  border: 1px solid var(--a-line-2, #383838);
+  border-radius: var(--a-r-sm, 6px) !important;
+  font-family: var(--a-mono, monospace);
+  font-size: 11px;
+  box-shadow: inset 2px 0 0 0 color-mix(in oklab, var(--a-fg, #ededed) 40%, transparent);
+}
+html[data-artex] body .select:focus,
+html[data-artex] body select:focus {
+  border-color: var(--a-fg, #ededed);
+  box-shadow: inset 2px 0 0 0 var(--a-fg, #ededed), 0 0 0 1px var(--a-fg, #ededed);
+}
+/* 键盘态保留可见焦点环（artex.css 的通用环被上面的 :focus 覆盖，这里补回） */
+html[data-artex] body .select:focus-visible,
+html[data-artex] body select:focus-visible {
+  outline: 2px solid var(--a-fg, #ededed);
+  outline-offset: 1px;
+}
+/* range 不吃表单皮肤（artex.css 的通用 input 规则会把它画成方块） */
+html[data-artex] body input[type="range"] {
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  accent-color: var(--a-fg, #ededed);
+}
+html[data-artex] body .scrub { accent-color: var(--a-fg, #ededed); }
+html[data-artex] body .scrub:focus-visible { outline: 2px solid var(--a-fg, #ededed); outline-offset: 2px; }
+
+/* ---------------------------------------- 装饰 6 · 表格铭牌式表头 */
+html[data-artex] body .dossier table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+html[data-artex] body .dossier thead th,
+html[data-artex] body .dossier th {
+  background: transparent !important;
+  border: 0 !important;
+  border-bottom: 1px solid var(--a-line-2, #383838) !important;
+  color: var(--a-muted, #8a8a8a) !important;
+  font-family: var(--a-mono, monospace);
+  font-size: 10px;
+  font-weight: 500 !important;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: left;
+  padding: 6px 8px !important;
+  white-space: nowrap;
+}
+html[data-artex] body .dossier td {
+  border: 0 !important;
+  border-bottom: 1px solid var(--a-line, #262626) !important;
+  color: var(--a-fg-2, #c4c4c4) !important;
+  padding: 6px 8px !important;
+}
+html[data-artex] body .dossier tbody tr:hover td {
+  background: var(--a-hover, rgba(255, 255, 255, .05));
+  color: var(--a-fg, #ededed) !important;
+}
+
+/* ------------------------- 装饰 7 · 列表选中左导轨（对齐 AR TEX nav） */
+html[data-artex] body .sess,
+html[data-artex] body .rung,
+html[data-artex] body .theme-btn,
+html[data-artex] body .tab {
+  border-radius: var(--a-r-sm, 6px) !important;
+  box-shadow: inset 2px 0 0 0 transparent;
+  transition: background var(--a-dur, 160ms) ease, box-shadow var(--a-dur, 160ms) ease;
+}
+html[data-artex] body .sess[aria-selected="true"] {
+  background: var(--a-active, rgba(255, 255, 255, .09));
+  border-color: transparent;
+  box-shadow: inset 2px 0 0 0 var(--a-fg, #ededed);
+}
+html[data-artex] body .sess:hover { background: var(--a-hover, rgba(255, 255, 255, .05)); }
+html[data-artex] body .rung:hover { background: var(--a-hover, rgba(255, 255, 255, .05)); }
+html[data-artex] body .rung.on { box-shadow: inset 2px 0 0 0 var(--a-fg, #ededed); }
+html[data-artex] body .tab[aria-selected="true"] { box-shadow: inset 2px 0 0 0 var(--a-fg, #ededed); }
+html[data-artex] body .theme-btn[aria-pressed="true"] { box-shadow: inset 2px 0 0 0 var(--a-fg, #ededed); }
+
+/* ------------------------------------------ 工具条：玻璃改实心浮层 */
+html[data-artex] body .toolbar {
+  background: var(--a-surface, #0f0f0f) !important;
+  border: 1px solid var(--a-line, #262626) !important;
+  border-radius: var(--a-r, 10px);
+}
+
+/* ---------------------------------------------- 时间线：实底承托密集数据
+   AR TEX 规矩是"网格之上再铺一层实底"——时间线只有实底才不花。 */
+html[data-artex] body .timeline {
+  background: var(--a-panel, #141414);
+  border-radius: var(--a-r, 10px);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--a-line, #262626) 55%, transparent);
+  padding: 8px 10px 16px 6px;
+}
+html[data-artex] body .ev {
+  border-radius: 0 !important;
+  border-left: 2px solid transparent;
+  padding: 5px 8px;
+}
+html[data-artex] body .ev:hover { background: var(--a-hover, rgba(255, 255, 255, .05)); }
+html[data-artex] body .ev.turn {
+  border-left-color: var(--a-fg, #ededed);
+  background: var(--a-panel-2, #1a1a1a);
+}
+html[data-artex] body .ev.cursor {
+  background: var(--a-active, rgba(255, 255, 255, .09));
+  box-shadow: inset 0 0 0 1px var(--a-line-2, #383838) !important;
+}
+html[data-artex] body .ev-t,
+html[data-artex] body .ev-args,
+html[data-artex] body .cursor-label,
+html[data-artex] body .head-meta,
+html[data-artex] body .sess-sid,
+html[data-artex] body .stat-v { font-variant-numeric: tabular-nums; }
+
+/* ------------------------------------------------ 徽章 / chip 收边 */
+html[data-artex] body .verdict-badge {
+  border-radius: 999px;
+  background: var(--a-panel-2, #1a1a1a);
+  border: 1px solid var(--a-line-2, #383838);
+  font-family: var(--a-mono, monospace);
+}
+html[data-artex] body .verdict-badge.tone-ok,
+html[data-artex] body .verdict-badge.tone-warn {
+  background: var(--a-panel-2, #1a1a1a);
+  border-color: var(--a-line-2, #383838);
+}
+html[data-artex] body .verdict-badge.tone-bad {
+  background: color-mix(in oklab, var(--a-danger, #e5484d) 10%, var(--a-panel, #141414));
+  border-color: color-mix(in oklab, var(--a-danger, #e5484d) 42%, transparent);
+}
+html[data-artex] body .verdict-zh { font-family: var(--a-font, sans-serif); letter-spacing: 0.02em; }
+html[data-artex] body .chip,
+html[data-artex] body .tag,
+html[data-artex] body .link-chip,
+html[data-artex] body .sess-depth,
+html[data-artex] body .ver {
+  border-radius: 999px !important;
+  font-family: var(--a-mono, monospace);
+  border-color: var(--a-line, #262626);
+}
+html[data-artex] body .chip[aria-pressed="true"] {
+  background: var(--a-active, rgba(255, 255, 255, .09));
+  border-color: var(--a-line-2, #383838);
+  color: var(--a-fg, #ededed);
+}
+html[data-artex] body .chip .n { color: var(--a-faint, #6b6b6b); font-variant-numeric: tabular-nums; }
+
+/* ------------------------------------------ 主题切换：视觉恒定说明 */
+html[data-artex] body .theme-switch {
+  grid-template-columns: 1fr 1fr;
+  border-top: 1px solid var(--a-line, #262626);
+  gap: 4px;
+}
+html[data-artex] body .theme-switch::before {
+  content: "AR TEX · DARK 固定";
+  grid-column: 1 / -1;
+  font-family: var(--a-mono, monospace);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  color: var(--a-faint, #6b6b6b);
+  padding-bottom: 2px;
+}
+html[data-artex] body .theme-btn {
+  background: transparent;
+  border: 1px solid var(--a-line, #262626);
+  color: var(--a-muted, #8a8a8a);
+  opacity: 0.55;
+  font-family: var(--a-mono, monospace);
+  font-size: 11px;
+}
+html[data-artex] body .theme-btn:hover { background: var(--a-hover, rgba(255, 255, 255, .05)); opacity: 0.85; }
+html[data-artex] body .theme-btn[aria-pressed="true"] {
+  background: transparent;
+  border-color: var(--a-line-2, #383838);
+  color: var(--a-fg, #ededed);
+  opacity: 0.9;
+}
+
+/* -------------------------------------------------- 语义色：只剩危险红 */
+html[data-artex] body .err-banner {
+  background: color-mix(in oklab, var(--a-danger, #e5484d) 10%, var(--a-panel, #141414));
+  border: 1px solid color-mix(in oklab, var(--a-danger, #e5484d) 42%, transparent);
+  border-radius: var(--a-r-sm, 6px);
+}
+html[data-artex] body .dot.ok { background: var(--a-fg, #ededed); }
+html[data-artex] body .dot.warn { background: var(--a-fg-2, #c4c4c4); }
+html[data-artex] body .dot.bad { background: var(--a-danger, #e5484d); }
+html[data-artex] body .dot.none { background: transparent; border: 1px solid var(--a-line-2, #383838); }
+html[data-artex] body .stat-v.tone-warn { color: var(--a-fg-2, #c4c4c4); }
+html[data-artex] body .stat-v.tone-ok { color: var(--a-fg, #ededed); }
+html[data-artex] body .chain-banner {
+  border-radius: var(--a-r-sm, 6px);
+  background: var(--a-panel-2, #1a1a1a);
+  border-color: var(--a-line, #262626);
+}
+html[data-artex] body .chain-banner.tone-ok,
+html[data-artex] body .chain-banner.tone-warn {
+  background: var(--a-panel-2, #1a1a1a);
+  border-color: var(--a-line-2, #383838);
+}
+
+/* ------------------------------------------------------ 档案区排版 */
+html[data-artex] body .dossier { padding: var(--a-pad, 16px) 24px; }
+html[data-artex] body .dossier h1 { font-size: 15px; }
+html[data-artex] body .dossier h2 {
+  font-family: var(--a-mono, monospace);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--a-muted, #8a8a8a);
+  border-bottom: 1px solid var(--a-line, #262626);
+  padding-bottom: 5px;
+}
+html[data-artex] body .dossier h3 { font-size: 12px; color: var(--a-fg, #ededed); }
+html[data-artex] body .dossier code {
+  background: var(--a-panel-2, #1a1a1a);
+  border: 1px solid var(--a-line, #262626);
+  border-radius: var(--a-r-xs, 4px);
+  color: var(--a-fg-2, #c4c4c4);
+}
+html[data-artex] body .dossier hr { border-top: 1px solid var(--a-line, #262626); }
+html[data-artex] body .dossier th,
+html[data-artex] body .dossier td { border-radius: 0 !important; }
+
+/* --------------------------------------------------------- 滚动条 */
+html[data-artex] body .sess-list,
+html[data-artex] body .timeline,
+html[data-artex] body .col-right,
+html[data-artex] body .dossier {
+  scrollbar-color: var(--a-line-2, #383838) transparent;
+}
+
+/* ------------------------------------------------------ 空态与提示 */
+html[data-artex] body .empty-title {
+  font-family: var(--a-mono, monospace);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  color: var(--a-fg-2, #c4c4c4);
+}
+html[data-artex] body .empty-sub { color: var(--a-faint, #6b6b6b); }
+html[data-artex] body .brand-name { font-size: 15px; letter-spacing: 0.04em; }
+html[data-artex] body .brand-en {
+  font-family: var(--a-mono, monospace);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--a-muted, #8a8a8a);
+}
+html[data-artex] body .fld-label,
+html[data-artex] body .sess-head,
+html[data-artex] body .speed-label {
+  font-family: var(--a-mono, monospace);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--a-muted, #8a8a8a);
+}
