@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 运行产物（每次诱捕实验的证据账本，含真实交互数据，不入库）
+runs/
+
+# macOS
+.DS_Store

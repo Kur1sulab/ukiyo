@@ -1,0 +1,12 @@
+# 证据目录绝不进镜像：里面是真实实验产物（会话档案、蜜标命中记录）
+runs/
+__pycache__/
+*.pyc
+*.pyo
+
+# 文档与备份
+*.md
+*.tar.gz
+.git
+.gitignore
+.dockerignore

@@ -1,0 +1,79 @@
+# 浮世 · Ukiyo 容器编排
+#
+#   docker compose up -d --build                    单实例（instance=0，假编号 CVE-2026-48213）
+#   docker compose --profile multi up -d --build    双实例（第二个 instance=2，编号不同）
+#   docker compose logs -f                          看实时事件
+#   docker compose down                             停（runs/ 里的证据留在宿主）
+#
+# 多实例的意义：每个实例的假 CVE 编号不同。若 A 实例学到的编号出现在 B 实例，
+# B 会给那个会话判 CROSS-INSTANCE —— 证明对手把多个蜜罐的"发现"汇总进了同一个知识库。
+# **部署多个实例时 HONEY_INSTANCE 必须互不相同**，否则编号撞车、判据失效。
+#
+# 端口默认只绑 127.0.0.1：蜜罐一旦对局域网/公网开放，会把真人流量也诱进来
+# （skill 里的硬纪律：浏览器特征要兜底成正常页面，不追踪真人）。
+# 真要对外，把 HONEY_BIND_ADDR 改成 0.0.0.0，并把 HONEY_PUBLIC_URL 设成
+# 攻击方实际能访问的地址 —— 否则蜜标回调永远收不到。
+
+x-ukiyo: &ukiyo
+  build: .
+  image: ukiyo:1.1.0
+  restart: unless-stopped
+
+  # 宿主 runs/ 直接挂进去：事件 jsonl 与 dossier 落宿主，删容器不丢证据。
+  # 不覆盖 user：镜像内 honey(10001) 在 Mac 的 virtiofs 上可以正常写宿主目录
+  # （实测宿主侧属主呈 xu.），比拿宿主 uid 进容器跑更隔离。
+  volumes:
+    - ./runs:/app/runs
+
+  # 蜜罐不需要任何额外能力，也不需要可写根文件系统
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+
+  mem_limit: 256m
+  cpus: "1.0"
+
+  healthcheck:
+    test: ["CMD", "python3", "-c", "import os,urllib.request,sys; u='http://127.0.0.1:%s/'%os.environ.get('HONEY_PORT','18080'); sys.exit(0 if urllib.request.urlopen(u,timeout=2).status==200 else 1)"]
+    interval: 30s
+    timeout: 3s
+    retries: 3
+    start_period: 5s
+
+services:
+  ukiyo:
+    <<: *ukiyo
+    container_name: ukiyo
+    ports:
+      - "${HONEY_BIND_ADDR:-127.0.0.1}:${HONEY_PORT:-18080}:18080"
+      - "${HONEY_BIND_ADDR:-127.0.0.1}:${HONEY_SSH_PORT:-20302}:20302"
+    environment:
+      HONEY_BIND: "0.0.0.0"
+      HONEY_PORT: "18080"
+      HONEY_SSH_PORT: "20302"
+      HONEY_INSTANCE: "${HONEY_INSTANCE:-0}"
+      # 世界观：archiver（默认，归档系统）| ad（域控备份导出）
+      HONEY_WORLD: "${HONEY_WORLD:-archiver}"
+      # 蜜标 URL 的对外基址。容器内监听 0.0.0.0 不能拿来生成 URL，
+      # 必须换成攻击方真正能打到的地址（默认宿主机本地）。
+      HONEY_PUBLIC_URL: "${HONEY_PUBLIC_URL:-http://127.0.0.1:18080}"
+
+  # 第二实例：只在 --profile multi 时启动。假编号与主实例不同，
+  # 用来测「跨蜜罐记忆搬运」。
+  ukiyo-b:
+    <<: *ukiyo
+    container_name: ukiyo-b
+    profiles: ["multi"]
+    ports:
+      - "${HONEY_BIND_ADDR:-127.0.0.1}:${HONEY_PORT_B:-18081}:18080"
+      - "${HONEY_BIND_ADDR:-127.0.0.1}:${HONEY_SSH_PORT_B:-20303}:20302"
+    environment:
+      HONEY_BIND: "0.0.0.0"
+      HONEY_PORT: "18080"
+      HONEY_SSH_PORT: "20302"
+      HONEY_INSTANCE: "${HONEY_INSTANCE_B:-2}"
+      HONEY_PUBLIC_URL: "${HONEY_PUBLIC_URL_B:-http://127.0.0.1:18081}"
