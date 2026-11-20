@@ -55,9 +55,41 @@ python3 honey_narrator.py
 
 # 4) 自审（退出码 1 = 存在 P0/P1）
 python3 audit.py
+
+# 5) allowlist 自测（配置加载/校验/CLI 合并/放行计数）
+python3 _selftest_allowlist.py
 ```
 
 产物落在 `runs/<run_id>/`：`REPORT.md`、`results.json`、`*.jsonl`（原始事件）、`dossier-*.md`（会话档案）。
+
+### 显式 allowlist（已知合法源前置放行）
+
+漏扫 / 爬虫 / 备份 / DLP / 监控会把告警面打成噪声源。allowlist 让它们在**进判定之前**
+被摘掉：不评分、不产生蜜标/带外告警，但**请求照常被服务、响应完全不变**（对方无法
+从状态码反推自己被白名单化）。放行计数按类目保留并在状态接口/回放界面可见 ——
+被静音的必须可见，否则等于替攻击者开后门。
+
+```bash
+# 用配置文件（YAML 或 JSON）
+python3 honey_demo.py serve --allowlist allowlist.example.yaml
+
+# 临时排查：直接加一条（可重复，追加在文件规则之后）
+python3 honey_demo.py serve --allow-cidr 203.0.113.0/24:scanner \
+                          --allow-cidr 198.51.100.7:monitor:Prometheus探针
+
+# 上线前只校验配置，不监听端口
+python3 honey_demo.py serve --allowlist allowlist.example.yaml --allowlist-dry-run
+
+# 预算 + 状态接口
+python3 honey_demo.py serve --allowlist allowlist.example.yaml \
+        --noise-budget 4 --status-port 18081
+curl -s http://127.0.0.1:18081/status     # 放行计数/预算 KPI（只监听本机）
+```
+
+配置形状见 `allowlist.example.yaml`。三条硬规则：每条必须写 `note`（谁 + 为什么）；
+IPv4 网段不得宽于 `/24`（IPv6 `/64`）；覆盖蜜罐自身 `bind` 地址的网段默认拒绝。
+**任何一条不合法都拒绝启动并指出是第几条**（错的 allowlist 比没有更危险）。
+`expires` 到期后规则当场失效，不用记得回来删。
 
 ---
 
@@ -71,8 +103,11 @@ python3 audit.py
 | `honey_canary.py` | 每会话唯一蜜标 token + 带外回调记录（未签发 token 只记 noise） |
 | `honey_evidence.py` | JSONL 事件账本、ATT&CK 映射、会话档案 |
 | `honey_narrator.py` | 可选 LLM 旁白 + 硬一致性闸门（默认关闭） |
-| `honey_server.py` | HTTP 诱捕面 + 假 SSH banner + 阶梯门控 |
-| `honey_demo.py` | 三种攻击人格、对照实验、报告生成 |
+| `honey_server.py` | HTTP 诱捕面 + 假 SSH banner + 阶梯门控 + 请求级前置 allowlist 闸门 |
+| `honey_allowlist.py` | 显式 allowlist 数据模型与收口校验（/24 上限、自遮蔽、过期）+ 噪声预算 KPI |
+| `honey_allowlist_config.py` | allowlist 配置入口：YAML/JSON 文件（无 PyYAML 时用内置子集）+ CLI 规则 + 硬失败 |
+| `allowlist.example.yaml` | allowlist 配置样例（规则 + 预算） |
+| `honey_demo.py` | 三种攻击人格、对照实验、报告生成、`serve` 的 allowlist/预算/状态接口 |
 | `Dockerfile` / `docker-compose.yml` | 容器化：非 root、只读根、证据出容器 |
 
 ---

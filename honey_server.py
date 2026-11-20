@@ -22,6 +22,7 @@ import socket
 import threading
 import time
 import urllib.parse
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import honey_detect
@@ -99,11 +100,89 @@ class Honeypot:
         self._oob_cache: dict[str, dict] = {}
         self._dns_thread: threading.Thread | None = None
 
+        # ===== 调用方前置 allowlist（honey_demo 注入，默认不启用）=====
+        # request_gate=None 时下面所有代码都是死代码：不装 gate 的实例行为与从前
+        # 逐字节相同。装上之后，已知合法源在**进判定之前**被摘掉：
+        #   · 不跑 honey_detect.classify（扫描器不会把会话评分打高）
+        #   · 不产生 canary/oob 告警（/c/、/sts、/mcp 各自还会再问一次 allowlist）
+        #   · 但**请求照常被服务、响应完全不变** —— 否则对方能从状态码反推
+        #     「我被白名单了」，等于告诉它这套蜜罐有静音名单。
+        #   · 计数按类目保留，并在状态接口/回放界面里与噪声分开显示：
+        #     被静音的必须可见，否则等于替攻击者开后门。
+        self.request_gate: Callable[..., "honey_allowlist.Decision | None"] | None = None
+        self.allow_counts: dict[str, int] = {k: 0 for k in honey_allowlist.RULE_KINDS}
+        self.allow_paths: dict[str, int] = {}
+        self._allow_pend: dict[tuple[str, str], dict] = {}
+        # 账本聚合窗口：扫描器一秒几十个请求，逐条落账会把 live.jsonl 变成刷屏，
+        # 反而没人看得见真正的告警。窗口内按 (类目, 源 IP) 聚合，带 n 计数。
+        self.ALLOW_LEDGER_WINDOW = 60.0
+
     # ------------------------------------------------------------------
     def admit(self, ip: str, port: int | None = None,
               ua: str | None = None) -> "honey_allowlist.Decision":
         """准入判断的唯一入口。所有证据点（/c/、/sts、/mcp）都先问它。"""
         return self.allowlist.check(ip, port=port, ua=ua)
+
+    # ---------------- 请求级前置放行（调用方注入 gate 后才生效）----------------
+    def gate_request(self, ip: str, port: int | None = None,
+                     ua: str | None = None, method: str = "",
+                     path: str = "") -> "honey_allowlist.Decision | None":
+        """请求级准入。没装 gate → None（调用方据此判定「不启用」，行为完全不变）。"""
+        if self.request_gate is None:
+            return None
+        d = self.request_gate(ip, port, ua)
+        if d is None or not d.allowed:
+            return d
+        self.note_allowlisted(d, ip, method=method, path=path)
+        return d
+
+    def note_allowlisted(self, d: "honey_allowlist.Decision", ip: str,
+                         method: str = "", path: str = "") -> None:
+        """计数 + 聚合落账。只记「被摘掉了多少」，不产生任何告警。"""
+        kind = d.kind or "?"
+        self.allow_counts[kind] = self.allow_counts.get(kind, 0) + 1
+        p = (path or "/").split("?", 1)[0]
+        if p in self.allow_paths or len(self.allow_paths) < 200:
+            self.allow_paths[p] = self.allow_paths.get(p, 0) + 1
+        now = time.time()
+        key = (kind, ip)
+        st = self._allow_pend.get(key)
+        if st is not None and now - st["first"] >= self.ALLOW_LEDGER_WINDOW:
+            # 上一窗口先结账，再开新窗口：窗口之间不重叠，n 的含义才稳定
+            self._flush_allow(key)
+            st = None
+        if st is None:
+            st = {"n": 0, "first": now, "path": p, "method": method}
+            self._allow_pend[key] = st
+        st["n"] += 1
+
+    def _flush_allow(self, key: tuple[str, str]) -> None:
+        st = self._allow_pend.pop(key, None)
+        if not st:
+            return
+        kind, ip = key
+        self.ledger.log(kind="allowlist", ctype=kind, ip=ip, n=st["n"],
+                        method=st.get("method") or "", path=st.get("path") or "",
+                        window_s=round(time.time() - st["first"], 1),
+                        detail=f"前置放行 {st['n']} 个请求（{kind}）")
+
+    def flush_allowlist_ledger(self) -> None:
+        for key in list(self._allow_pend):
+            self._flush_allow(key)
+
+    def allowlist_status(self) -> dict:
+        """状态接口用：放行规则 + 按类目计数 + 预算 KPI，一次给全。"""
+        return {
+            "enabled": self.request_gate is not None,
+            "rules": self.allowlist.to_dict()["rules"],
+            "rules_count": len(self.allowlist),
+            "requests_by_kind": dict(self.allow_counts),
+            "requests_total": sum(self.allow_counts.values()),
+            "top_paths": sorted(self.allow_paths.items(), key=lambda kv: -kv[1])[:10],
+            "check_stats": dict(self.allowlist.stats),
+            "budget": self.budget.report(),
+            "budget_line": self.budget.budget_line(),
+        }
 
     def _oob_hit(self, rec: dict) -> None:
         """带外命中落账本。alert 走 canary 语义（进归因），touch 只记不告警。"""
@@ -158,6 +237,7 @@ class Honeypot:
 
     def stop(self) -> None:
         self._stop.set()
+        self.flush_allowlist_ledger()
         if self.dns is not None:
             self.dns.stop()
         if self._httpd:
@@ -282,6 +362,9 @@ def _free_port(bind: str = "127.0.0.1") -> int:
 
 def make_handler(hp: Honeypot):
     class Handler(BaseHTTPRequestHandler):
+        # 本次请求被前置 allowlist 摘掉时的 Decision；None = 正常请求（或未启用 gate）
+        _allow = None
+
         protocol_version = "HTTP/1.1"
         server_version = "nginx"
         sys_version = ""
@@ -316,9 +399,12 @@ def make_handler(hp: Honeypot):
             ua = self.headers.get("User-Agent", "")
             s = hp.sessions.get_or_create(raw, self._client_ip(), ua)
             now = time.time()
-            cls = honey_detect.classify(dict(self.headers), urllib.parse.urlsplit(self.path).path,
-                                        s.last_ts, now, s.paths)
-            s.cls, s.score, s.reasons = cls["klass"], cls["score"], cls["reasons"]
+            if self._allow is None:
+                # 被前置放行的请求不进判定：扫描器的枚举不该把会话评分打高，
+                # 否则 allowlist 只挡住了告警、没挡住「证据污染」。
+                cls = honey_detect.classify(dict(self.headers), urllib.parse.urlsplit(self.path).path,
+                                            s.last_ts, now, s.paths)
+                s.cls, s.score, s.reasons = cls["klass"], cls["score"], cls["reasons"]
             s.requests += 1
             s.paths.append(urllib.parse.urlsplit(self.path).path)
             if len(s.paths) > 400:
@@ -351,9 +437,10 @@ def make_handler(hp: Honeypot):
 
         def _log(self, s, status: int, note: str = "") -> None:
             path = urllib.parse.urlsplit(self.path).path
+            extra = {"allowlisted": self._allow.kind} if self._allow is not None else {}
             hp.ledger.log(kind="http", session=s.id, ip=self._client_ip(),
                           method=self.command, path=self.path, status=status,
-                          note=note, cls=s.cls, score=s.score, depth=s.depth)
+                          note=note, cls=s.cls, score=s.score, depth=s.depth, **extra)
 
         # ---------------- 入口 ----------------
         def do_GET(self):
@@ -366,6 +453,12 @@ def make_handler(hp: Honeypot):
             self._dispatch("HEAD")
 
         def _dispatch(self, method: str):
+            # ===== 前置 allowlist：在 _session()（内含 honey_detect.classify）之前 =====
+            self._allow = hp.gate_request(self._client_ip(), hp.http_port,
+                                          self.headers.get("User-Agent", ""),
+                                          method=method, path=self.path)
+            if self._allow is not None and not self._allow.allowed:
+                self._allow = None      # 未命中 → 完全按真实流量处理
             s = self._session()
             parts = urllib.parse.urlsplit(self.path)
             path, qs = parts.path, urllib.parse.parse_qs(parts.query)
@@ -395,13 +488,26 @@ def make_handler(hp: Honeypot):
                 # 否则对方能从状态码反推自己是否被白名单化。
                 adm = hp.admit(self._client_ip(), hp.http_port,
                                self.headers.get("User-Agent", ""))
-                if adm.allowed:
+                if adm.allowed and self._allow is None:
+                    # 请求级 gate 已放行时走不到这里（上面已计数+落账），避免重复记账。
                     hp.budget.allowlisted(f"canary {tok[:8]} from {self._client_ip()}")
                     hp.ledger.log(kind="allowlist", ctype="canary", token=tok,
                                   ip=self._client_ip(), session=s.id, detail=adm.reason)
                     self._send(200, json.dumps({"status": "ok"}),
                                ctype="application/json", s=s)
                     self._log(s, 200, f"canary-allowlisted:{adm.kind}")
+                    return
+                if self._allow is not None:
+                    # 请求级 gate 已放行：响应与正常路径**逐字节一致**（已知 token 200 /
+                    # 未知 404），但不写 vault.hits、不写 canary 事件 —— 放行只影响告警，
+                    # 不影响对外行为，否则对方能从状态码反推自己被白名单化。
+                    known = tok in hp.vault.tokens
+                    self._send(200 if known else 404,
+                               json.dumps({"status": "ok"} if known
+                                          else {"error": "not_found"}),
+                               ctype="application/json", s=s)
+                    self._log(s, 200 if known else 404,
+                              f"canary-allowlisted:{self._allow.kind}")
                     return
                 rec = hp.vault.hit(tok, self._client_ip(), args, current_session=s.id)
                 if rec is None:

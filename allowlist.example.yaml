@@ -1,0 +1,43 @@
+# 浮世 allowlist 配置样例 —— 复制成 allowlist.yaml 后按需改。
+#
+# 上线前请能一眼读完这张表：每条都必须写 note（谁 + 为什么）。
+# IPv4 不得宽于 /24，IPv6 不得宽于 /64，覆盖蜜罐自身 bind 地址的网段默认拒绝。
+# 任何一条不合法 → 程序拒绝启动并指出是哪一条（错的 allowlist 比没有更危险）。
+
+version: 1
+
+# 可选：本机监听地址，用于「网段覆盖了自己」的检查。
+# 与命令行 --bind 不一致时会打 warning。
+bind_ip: 127.0.0.1
+
+rules:
+  # 办公网漏扫出口（Nessus 从这台机器出去）—— 典型的前置放行对象
+  - cidr: 203.0.113.0/24
+    kind: scanner
+    note: 办公网漏扫出口 Nessus，每周二 02:00 全量扫
+    expires: 2026-12-31        # 可选：到期后规则当场失效，不用记得回来删
+
+  # 监控探针单机，只打 443/8080
+  - cidr: 198.51.100.7
+    kind: monitor
+    note: Prometheus blackbox 探针
+    ports: [443, 8080]
+
+  # 爬虫：UA 也要对得上（显式写死，不是启发式）
+  - cidr: 198.51.100.128/25
+    kind: crawler
+    note: 内部文档索引爬虫
+    ua_like: UkiyoIndexer
+
+  # 备份：只放行特定端口
+  - cidr: 192.0.2.40
+    kind: backup
+    note: 夜备 rsync 源
+    ports: [22, 873]
+
+# 噪声预算（Thinkst 基准：数百蜜标 ≈ 4 告警/年 → 按本实例蜜标数等比缩小）
+noise_budget:
+  canaries: 14
+  alerts_per_year: 4
+  baseline_noise_per_day: 2.0
+  window_days: 30

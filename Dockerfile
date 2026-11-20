@@ -21,6 +21,7 @@ WORKDIR /app
 # 一律不进镜像：它们含出站客户端代码，留着只会让「蜜罐不出站」这件事变成口头承诺。
 COPY honey_world.py honey_world_ad.py honey_state.py honey_detect.py \
      honey_canary.py honey_evidence.py honey_narrator.py honey_server.py \
+     honey_allowlist.py honey_allowlist_config.py \
      honey_demo.py audit.py verify-docker.py ./
 
 # 非 root 运行；runs/ 是唯一需要写入的路径（compose 会给它挂宿主目录）

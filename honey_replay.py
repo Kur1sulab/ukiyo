@@ -71,6 +71,9 @@ KIND_ZH = {
     "http": "HTTP", "staircase": "叙事门", "canary": "蜜标回调",
     "exec": "命令执行", "download": "取走档案", "intel": "假情报",
     "noise": "噪声", "memory": "跨实例记忆", "ssh": "SSH", "warn": "告警",
+    # 被显式 allowlist 放行的源：必须**可见**，且与噪声分列 ——
+    # 静音如果不可见，就等于替攻击者开后门。
+    "allowlist": "放行(静音)",
 }
 NOTE_ZH = {
     "login-page": "看了登录页（指纹）",
@@ -458,6 +461,10 @@ def session_summary(run: dict, sid: str, mine: list[dict]) -> dict:
         "verdict_match": (snap is None or snap.get("verdict") == verdict),
         "authed_as": snap.get("authed_as") if snap else None,
         "canaries": sum(1 for e in mine if e.get("kind") == "canary"),
+        "allowlisted_events": sum(1 for e in mine if e.get("kind") == "allowlist"),
+        # 请求数：请求级前置放行按 (类目,IP,窗口) 聚合，n 是被摘掉的请求数
+        "allowlisted_requests": sum(int(e.get("n") or 1) for e in mine
+                                    if e.get("kind") == "allowlist"),
         "leaked": leaked,
         "t0": mine[0].get("t"), "t1": mine[-1].get("t"),
         "has_dossier": _dossier_path(run, sid, mine) is not None,
@@ -502,8 +509,11 @@ def run_stats(run: dict) -> dict:
     dist: dict[str, int] = {}
     for s in sums:
         dist[s["verdict"]] = dist.get(s["verdict"], 0) + 1
+    allow_req = sum(int(e.get("n") or 1) for e in run["events"]
+                    if e.get("kind") == "allowlist")
     return {"id": run["id"], "n_events": len(run["events"]),
             "n_sessions": len(sums), "verdicts": dist,
+            "allowlisted_requests": allow_req,
             "max_depth": max([s["depth"] for s in sums] or [0]),
             "t0": run["events"][0].get("t") if run["events"] else None,
             "t1": run["events"][-1].get("t") if run["events"] else None,

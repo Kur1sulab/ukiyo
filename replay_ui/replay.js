@@ -168,7 +168,7 @@ function renderSessions() {
       </span>
       <span class="sess-r2">
         <span class="sess-v">${esc(vzh(s.verdict))}</span>
-        <span class="sess-n">${s.n_events} 事件</span>
+        <span class="sess-n">${s.n_events} 事件${s.allowlisted_requests ? ` · 静音 ${s.allowlisted_requests}` : ''}</span>
       </span>
     </button>`;
   }).join('');
@@ -238,6 +238,9 @@ function renderHead() {
     `<span class="stat"><span class="stat-v">${sm.n_events}</span><span class="stat-k">账本事件</span></span>` +
     `<span class="stat"><span class="stat-v ${sm.cls === 'AGENT' ? 'tone-warn' : ''}">${sm.score == null ? '—' : sm.score}</span><span class="stat-k">${esc(clsZh)}评分</span></span>` +
     `<span class="stat"><span class="stat-v">${sm.canaries}</span><span class="stat-k">蜜标回调</span></span>` +
+    (sm.allowlisted_requests
+      ? `<span class="stat"><span class="stat-v">${sm.allowlisted_requests}</span><span class="stat-k">放行/静音 请求</span></span>`
+      : '') +
     `<span class="stat"><span class="stat-v">L${sm.depth}</span><span class="stat-k">信任深度</span></span>` +
     match;
   // 身份外带（有证据才展示值；没有就如实说没有）
@@ -260,6 +263,8 @@ function noteText(e) {
   if (note.startsWith('debug-exec:')) return 'debug 端点执行 ' + note.slice(11);
   return note;
 }
+const ALLOW_KIND_ZH = { scanner: '漏扫', crawler: '爬虫', backup: '备份', dlp: 'DLP',
+  monitor: '监控', canary: '蜜标', aws: 'AWS', mcp: 'MCP', dns: 'DNS' };
 function eventMain(e) {
   if (e.kind === 'http') {
     return `<span class="m">${esc(e.method || '')}</span><span class="p">${esc(e.path || '')}</span><span class="st">${e.status == null ? '' : e.status}</span>`;
@@ -274,6 +279,14 @@ function eventMain(e) {
   if (e.kind === 'intel') return `<span class="p">${esc(e.cve || '')}</span><span class="st">${esc(e.level || '')}</span>`;
   if (e.kind === 'memory') return `<span class="p">${esc(e.level || '')}</span><span class="st">${esc(e.note || '')}</span>`;
   if (e.kind === 'ssh') return `<span class="p">SSH 登录尝试</span><span class="st">${esc(e.user || '')}</span>`;
+  if (e.kind === 'allowlist') {
+    // 被前置 allowlist 摘掉的请求：显示成「放行」而不是「噪声」——
+    // 静音必须可见，否则等于替攻击者开后门。
+    const kz = ALLOW_KIND_ZH[e.ctype] || e.ctype || '?';
+    const n = e.n ? `×${e.n}` : '';
+    return `<span class="m">${esc(e.method || '')}</span><span class="p">${esc(e.path || '')}</span>` +
+      `<span class="st">放行 ${esc(kz)} ${n}</span>`;
+  }
   return `<span class="p">${esc(e.note || e.kind || '')}</span>`;
 }
 function renderTimeline() {
@@ -287,8 +300,10 @@ function renderTimeline() {
     ).join('');
     const args = e.kind === 'canary' && e.args && Object.keys(e.args).length
       ? `<div class="ev-args">${esc(Object.entries(e.args).map(([k, v]) => `${k}=${v}`).join(' · '))}</div>` : '';
-    const note = e.kind === 'http' || e.kind === 'staircase' ? noteText(e) : (e.kind === 'canary' ? noteText(e) : '');
-    const dot = e.kind === 'canary' ? '<span class="dot warn"></span>' : '';
+    const note = e.kind === 'http' || e.kind === 'staircase' ? noteText(e)
+      : (e.kind === 'canary' ? noteText(e) : (e.kind === 'allowlist' ? (e.detail || '') : ''));
+    const dot = e.kind === 'canary' ? '<span class="dot warn"></span>'
+      : (e.kind === 'allowlist' ? '<span class="dot ok"></span>' : '');
     return `<li class="ev" data-i="${i}" id="ev-${i}">
       <span class="ev-t">${hhmmss(e.t)}</span>
       <span class="ev-kind">${dot}${esc(kindZh)}</span>

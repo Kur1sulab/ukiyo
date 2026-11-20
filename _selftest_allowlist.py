@@ -12,6 +12,14 @@ allowlist 是蜜罐里最容易写错、错了又最难发现的东西：写宽�
      oob 告警为零；对照组三面全响。
   4. 噪声预算：Thinkst 比例可复算、超预算判 OVER 并给「审放置」而不是「关告警」、
      噪声尖峰报 placement 泄露、零流量报放置问题。
+  5. 配置入口：YAML 加载、JSON 加载、内置 YAML 子集（无 PyYAML 时）三条路结果一致。
+  6. 配置校验硬失败：非法 CIDR、/8、覆盖 bind、未知键、缺 note、类目拼错、
+     version 不认识、文件不存在 —— 全部抛错并指出**是第几条**，不许静默跳过。
+  7. CLI 合并：文件规则在前、CLI 追加在后；IPv6 竖线写法；非法 CLI 硬失败。
+  8. 过期：到期规则**当场**失效（不是只在加载时过滤），日期型按当天 23:59:59。
+  9. 请求级前置放行：真实 HTTP 打进来，按类目计数、账本零 canary、vault 零命中、
+     带外零告警，且状态接口/回放事件都能看见「被静音了多少」。
+ 10. CLI 层验收：`serve --help` 有全部新参数，非法配置退出码 2。
 
 用法：python3 _selftest_allowlist.py   （全过退出码 0，任一失败退出码 1）
 """
@@ -20,16 +28,21 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import honey_allowlist as al
+import honey_allowlist_config as alc
 import honey_demo as hd
 import honey_state
 from honey_server import Honeypot
 from _selftest_oob import http_post, sign_v4      # 复用独立签名器，避免第三份实现漂移
+
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 results: list[bool] = []
 
@@ -48,6 +61,26 @@ def try_add(cidr: str, *, kind: str = "scanner", note: str = "办公网漏扫出
         return None
     except al.AllowlistError as e:
         return str(e)
+
+
+def _raises(fn, exc) -> bool:
+    """只关心「有没有按预期抛错」，不吞掉别的异常类型。"""
+    try:
+        fn()
+    except exc:
+        return True
+    except Exception:
+        return False
+    return False
+
+
+def _errmsg(fn) -> str:
+    """跑一个应当失败的操作，返回它报的错（一次报全的多行文本）。"""
+    try:
+        fn()
+    except alc.ConfigError as e:
+        return "\n".join(e.errors)
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +262,274 @@ def main() -> int:
     check("窗口不足 7 天 → 标 INSUFFICIENT-DATA，不硬给结论",
           rs2["budget_status"] == "INSUFFICIENT-DATA" and not rs2["reliable"],
           f"elapsed={rs2['elapsed_days']}天")
+
+    ob = al.NoiseBudget(alerts_per_year=1, canaries=14)
+    for t in ("t1", "t2"):
+        ob.alert(t)
+    line = ob.budget_line()
+    check("超预算时 budget_line 给「本窗口告警/预算上限」+ 运营动作",
+          "本窗口告警 2" in line and "预算上限" in line
+          and "审 token 放置" in line and "不要关告警" in line,
+          line.splitlines()[-1][:70])
+
+    # ---------------------------------------------------------------
+    print("\n=== 5. 配置入口：YAML / JSON / 内置子集 ===")
+    cfgd = tempfile.mkdtemp(prefix="ukiyo-cfg-")
+    yml_path = os.path.join(cfgd, "allow.yaml")
+    yml_text = """version: 1
+bind_ip: 127.0.0.1
+rules:
+  - cidr: 203.0.113.0/24
+    kind: scanner
+    note: 办公网漏扫出口 Nessus
+    expires: 2026-12-31
+  - cidr: 198.51.100.7
+    kind: monitor
+    note: Prometheus 探针
+    ports: [443, 8080]
+  - cidr: 2001:db8:1:2::/64
+    kind: backup
+    note: v6 夜备
+noise_budget:
+  canaries: 14
+  alerts_per_year: 4
+  baseline_noise_per_day: 1.5
+  window_days: 30
+"""
+    with open(yml_path, "w", encoding="utf-8") as f:
+        f.write(yml_text)
+    b = alc.load(yml_path, bind_ip="127.0.0.1")
+    check("YAML 加载：3 条规则", len(b.allowlist) == 3, f"parser={b.parser}")
+    check("YAML 加载：类目/端口/过期时间都进来了",
+          b.allowlist.rules[0].kind == "scanner"
+          and b.allowlist.rules[1].ports == (443, 8080)
+          and b.allowlist.rules[0].expires_iso() == "2026-12-31T23:59:59",
+          f"expires={b.allowlist.rules[0].expires_iso()}")
+    check("YAML 加载：noise_budget 生效",
+          b.budget.canaries == 14 and b.budget.alerts_per_year == 4.0
+          and b.budget.baseline_noise_per_day == 1.5,
+          f"{b.budget.canaries}/{b.budget.alerts_per_year}/{b.budget.baseline_noise_per_day}")
+    check("加载后规则可直接用于判定", b.allowlist.check("203.0.113.9", port=443).allowed)
+
+    # JSON 走同一条构建路径
+    json_path = os.path.join(cfgd, "allow.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(alc.parse_yaml_subset(yml_text), f, ensure_ascii=False)
+    bj = alc.load(json_path, bind_ip="127.0.0.1")
+    check("JSON 加载结果与 YAML 一致",
+          [r.cidr for r in bj.allowlist.rules] == [r.cidr for r in b.allowlist.rules]
+          and bj.budget.canaries == b.budget.canaries, f"parser={bj.parser}")
+
+    # 只有一套解析器：同一文件重复加载必须逐字段一致（不同机器/不同入口都一样）
+    b2 = alc.load(yml_path, bind_ip="127.0.0.1")
+    check("单一解析器（零第三方依赖）：重复加载结果一致",
+          "零依赖" in b.parser
+          and [r.to_dict() for r in b2.allowlist.rules] == [r.to_dict() for r in b.allowlist.rules],
+          b.parser)
+    check("子集解析器拒绝 TAB 缩进并说清楚",
+          _raises(lambda: alc.parse_yaml_subset("rules:\n\t- cidr: x\n"), alc.ConfigError),
+          "TAB 是 YAML 的经典坑")
+
+    # ---------------------------------------------------------------
+    print("\n=== 6. 配置校验硬失败：错一条就拒绝启动，并指出是哪一条 ===")
+
+    def cfg_err(text: str) -> str:
+        p = os.path.join(cfgd, f"bad-{abs(hash(text)) % 10**8}.yaml")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+        try:
+            alc.load(p, bind_ip="127.0.0.1")
+        except alc.ConfigError as e:
+            return "\n".join(e.errors)
+        return ""
+
+    base_rule = "rules:\n  - cidr: {cidr}\n    kind: {kind}\n    note: {note}\n"
+    msg = cfg_err("version: 1\n" + base_rule.format(cidr="10.0.0.0/8", kind="scanner", note="全内网"))
+    check("/8 被拒且指出 rules[0]", "rules[0]" in msg and "/8" in msg, msg.splitlines()[0][:80] if msg else "（没报错）")
+    msg = cfg_err("version: 1\nbind_ip: 10.1.2.3\n"
+                  + base_rule.format(cidr="10.1.2.0/24", kind="scanner", note="同网段"))
+    check("覆盖自身 bind 地址被拒（bind 来自配置文件）",
+          "rules[0]" in msg and "监听地址" in msg, msg.splitlines()[0][:80] if msg else "（没报错）")
+    msg = cfg_err("version: 1\n" + base_rule.format(cidr="not-a-cidr", kind="scanner", note="x"))
+    check("非法 CIDR 被拒", "rules[0]" in msg and "无法解析" in msg, msg.splitlines()[0][:80] if msg else "（没报错）")
+    msg = cfg_err("version: 1\n" + base_rule.format(cidr="203.0.113.0/24", kind="scannr", note="x"))
+    check("类目拼错被拒（不是静默当成 unknown）", "类目" in msg, msg.splitlines()[0][:80] if msg else "（没报错）")
+    msg = cfg_err("version: 1\nrules:\n  - cidr: 203.0.113.0/24\n    kind: scanner\n")
+    check("缺 note 被拒", "缺 note" in msg, msg.splitlines()[0][:80] if msg else "（没报错）")
+    msg = cfg_err("version: 1\nrules:\n  - cidrr: 203.0.113.0/24\n    kind: scanner\n    note: x\n")
+    check("键拼错（cidrr）被拒 —— 否则等于规则为零",
+          "未知键" in msg and "cidrr" in msg, msg.splitlines()[0][:80] if msg else "（没报错）")
+    msg = cfg_err("version: 99\n" + base_rule.format(cidr="203.0.113.0/24", kind="scanner", note="x"))
+    check("version 不认识被拒", "version" in msg, msg.splitlines()[0][:80] if msg else "（没报错）")
+    msg = cfg_err("version: 1\nruless:\n  - cidr: 203.0.113.0/24\n")
+    check("顶层键拼错被拒", "未知键" in msg, msg.splitlines()[0][:80] if msg else "（没报错）")
+    msg = cfg_err("version: 1\n" + base_rule.format(cidr="203.0.113.0/24", kind="scanner", note="x")
+                  + "    expires: 明天\n")
+    check("过期时间写错被拒", "过期时间" in msg, msg.splitlines()[0][:80] if msg else "（没报错）")
+    check("文件不存在 → 明确报错，不是当成空表",
+          _raises(lambda: alc.load(os.path.join(cfgd, "nope.yaml")), alc.ConfigError))
+    # 一次报全：多条错规则应该一次列完，而不是改一条跑一次
+    multi = cfg_err("version: 1\nrules:\n"
+                    "  - cidr: 10.0.0.0/8\n    kind: scanner\n    note: a\n"
+                    "  - cidr: 11.0.0.0/8\n    kind: scanner\n    note: b\n")
+    check("多条错误一次报全（rules[0] 与 rules[1] 同时出现）",
+          "rules[0]" in multi and "rules[1]" in multi,
+          f"{len(multi.splitlines())} 行错误")
+
+    # ---------------------------------------------------------------
+    print("\n=== 7. CLI 参数合并 ===")
+    bcli = alc.load(yml_path, bind_ip="127.0.0.1",
+                    cli_specs=["203.0.113.9:scanner",
+                               "2001:db8:9:9::/64|monitor|v6 机房出口",
+                               "198.51.100.200:crawler:临时排查:2026-12-31"])
+    check("文件 3 条 + CLI 3 条 = 6 条", len(bcli.allowlist) == 6, f"{len(bcli.allowlist)} 条")
+    check("CLI 规则追加在文件规则之后（先声明先生效）",
+          [r.cidr for r in bcli.allowlist.rules[:3]] == [r.cidr for r in b.allowlist.rules],
+          str([r.cidr for r in bcli.allowlist.rules]))
+    check("CLI 冒号写法：cidr:kind", bcli.allowlist.rules[3].kind == "scanner")
+    check("CLI IPv6 竖线写法可用", bcli.allowlist.rules[4].cidr == "2001:db8:9:9::/64")
+    check("CLI 第四段是过期时间，第三段是 note",
+          bcli.allowlist.rules[5].note == "临时排查"
+          and bcli.allowlist.rules[5].expires_iso() == "2026-12-31T23:59:59",
+          f"{bcli.allowlist.rules[5].note} / {bcli.allowlist.rules[5].expires_iso()}")
+    check("CLI 计数记在 bundle 上", bcli.cli_rules == 3, f"cli_rules={bcli.cli_rules}")
+    msg = _errmsg(lambda: alc.load(yml_path, cli_specs=["0.0.0.0/0:scanner"]))
+    check("CLI 写 /0 → 硬失败", "--allow-cidr #1" in msg and "/0" in msg, msg.splitlines()[0][:80] if msg else "（没报错）")
+    msg = _errmsg(lambda: alc.load(yml_path, cli_specs=["203.0.113.0/24"]))
+    check("CLI 不写类目 → 硬失败", "认不出类目" in msg, msg.splitlines()[0][:80] if msg else "（没报错）")
+    msg = _errmsg(lambda: alc.load(yml_path, cli_specs=["203.0.113.0/24:scanner",
+                                                        "198.51.100.0/16:backup"]))
+    check("CLI 第 2 条非法时指到 #2", "--allow-cidr #2" in msg, msg.splitlines()[0][:80] if msg else "（没报错）")
+
+    # ---------------------------------------------------------------
+    print("\n=== 8. 过期时间：到期当场失效 ===")
+    ax = al.Allowlist()
+    ax.add("203.0.113.0/24", "scanner", "昨天到期", expires=time.time() - 60)
+    ax.add("198.51.100.0/24", "monitor", "一小时后到期", expires=time.time() + 3600)
+    check("已过期规则不再放行", not ax.check("203.0.113.9").allowed,
+          "serve 是长跑进程，只在加载时过滤等于过期时间形同虚设")
+    check("未到期规则照常放行", ax.check("198.51.100.9").allowed)
+    check("过期命中被单独计数", ax.stats["expired"] >= 1, f"expired={ax.stats['expired']}")
+    check("日期型过期按当天 23:59:59 算",
+          al.parse_expiry("2026-12-31") == time.mktime((2026, 12, 31, 23, 59, 59, 0, 0, -1)))
+    check("过期时间写错 → 报错（不静默当成永不过期）",
+          _raises(lambda: al.parse_expiry("下个月"), al.AllowlistError))
+
+    # ---------------------------------------------------------------
+    print("\n=== 9. 请求级前置放行：计数可见、零告警 ===")
+    al_g = al.Allowlist(bind_ip=None)
+    al_g.add("127.0.0.1", "scanner", "自测：本机当办公网漏扫出口")
+    hp_g = Honeypot(world=w, http_port=hd._free_port(), ssh_port=None,
+                    ledger_path=os.path.join(d, "gate.jsonl"), enable_ssh=False,
+                    dns_sink=False, allowlist=al_g)
+    hp_g.request_gate = al_g.check
+    hp_g.start()
+    try:
+        got_g = run_chain(hp_g.http_port)
+        cli = hd.Client(f"http://127.0.0.1:{hp_g.http_port}", hd.UA_AGENT)
+        for p in ("/", "/robots.txt", "/files/../..etc/passwd", "/nope"):
+            cli.get(p)
+        st = hp_g.allowlist_status()
+        check("状态接口：enabled=True（gate 已装）", st["enabled"] is True)
+        check("按类目计数（scanner）", st["requests_by_kind"].get("scanner", 0) >= 6,
+              f"scanner={st['requests_by_kind'].get('scanner')} total={st['requests_total']}")
+        check("计数合计 == 各类目之和",
+              st["requests_total"] == sum(st["requests_by_kind"].values()),
+              f"{st['requests_total']}")
+        check("top_paths 可见（知道放行了哪些路径）", bool(st["top_paths"]),
+              str(st["top_paths"][:3]))
+        check("放行后账本零 canary 事件",
+              not any(e.get("kind") == "canary" for e in hp_g.ledger.events),
+              f"canary={sum(1 for e in hp_g.ledger.events if e.get('kind') == 'canary')}")
+        check("放行后 vault 零命中（证据不被污染）", not hp_g.vault.hits,
+              f"hits={len(hp_g.vault.hits)}")
+        check("放行后带外零告警", not hp_g.oob.alerts(), f"{len(hp_g.oob.alerts())}")
+        check("http 事件带 allowlisted 标记（回放界面能标出来）",
+              any(e.get("allowlisted") == "scanner" for e in hp_g.ledger.events
+                  if e.get("kind") == "http"))
+        hp_g.flush_allowlist_ledger()
+        agg = [e for e in hp_g.ledger.events
+               if e.get("kind") == "allowlist" and "n" in e]
+        check("聚合落账：请求级 allowlist 事件带 n（不是逐条刷屏）",
+              bool(agg) and agg[0].get("n", 0) >= 1 and agg[0].get("ctype") == "scanner",
+              f"n={agg[0].get('n') if agg else None} 条={len(agg)}")
+        check("对外响应与不放行实例逐位一致（200/200/200）",
+              (got_g["canary"], got_g["sts"], got_g["mcp"]) == (ctl["canary"], ctl["sts"], ctl["mcp"]),
+              f"gate={got_g['canary']}/{got_g['sts']}/{got_g['mcp']} "
+              f"ctl={ctl['canary']}/{ctl['sts']}/{ctl['mcp']}")
+        check("被放行的会话不进判定（评分不被扫描器打高）",
+              all(s.score == 0 for s in hp_g.sessions.by_id.values()),
+              f"cls={[s.cls for s in hp_g.sessions.by_id.values()]} "
+              f"score={[s.score for s in hp_g.sessions.by_id.values()]}")
+
+        # 状态接口真的能访问（不是只有个方法）
+        sport = hd._free_port()
+        httpd = hd._status_server(hp_g, alc.load(yml_path, bind_ip="127.0.0.1"), sport,
+                                  {"instance": 0, "t0": time.time()})
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{sport}/status.json", timeout=5) as r:
+                body = r.read().decode("utf-8")
+            js = json.loads(body)
+            check("GET /status.json 返回按类目计数与预算 KPI",
+                  js["requests_by_kind"].get("scanner", 0) >= 6
+                  and "本窗口告警" in js["budget_line"] and js["enabled"] is True,
+                  f"scanner={js['requests_by_kind'].get('scanner')}")
+            with urllib.request.urlopen(f"http://127.0.0.1:{sport}/status", timeout=5) as r:
+                txt = r.read().decode("utf-8")
+            check("GET /status 文本里放行（静音）与噪声/告警分开列",
+                  "放行（静音）按类目" in txt and "噪声/告警" in txt and "scanner=" in txt,
+                  txt.splitlines()[2][:60])
+            with urllib.request.urlopen(f"http://127.0.0.1:{sport}/kpi", timeout=5) as r:
+                kpi = r.read().decode("utf-8")
+            check("GET /kpi 给出「本窗口告警 / 预算上限」",
+                  "本窗口告警" in kpi and "预算上限" in kpi, kpi.splitlines()[0][:60])
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+    finally:
+        hp_g.stop()
+
+    # 按类目分开计数（用两个网段的假来源，避开 127.0.0.1 唯一性）
+    al_k = al.Allowlist(bind_ip=None)
+    al_k.add("203.0.113.0/24", "scanner", "x")
+    al_k.add("198.51.100.0/24", "backup", "y")
+    hp_k = Honeypot(world=w, http_port=hd._free_port(), ssh_port=None,
+                    ledger_path=os.path.join(d, "kinds.jsonl"), enable_ssh=False,
+                    dns_sink=False, allowlist=al_k)
+    hp_k.request_gate = al_k.check
+    for ip in ("203.0.113.5", "203.0.113.6", "198.51.100.9", "192.0.2.1"):
+        hp_k.gate_request(ip, 80)
+    check("两个类目分别计数",
+          hp_k.allow_counts["scanner"] == 2 and hp_k.allow_counts["backup"] == 1,
+          json.dumps({k: v for k, v in hp_k.allow_counts.items() if v}))
+    check("未命中不计入放行", hp_k.allowlist_status()["requests_total"] == 3)
+    check("未装 gate 时行为完全不变（gate_request 返回 None）",
+          Honeypot(world=w, http_port=hd._free_port(), ssh_port=None,
+                   ledger_path=os.path.join(d, "nogate.jsonl"), enable_ssh=False,
+                   dns_sink=False).gate_request("203.0.113.5", 80) is None)
+
+    # ---------------------------------------------------------------
+    print("\n=== 10. CLI 层验收 ===")
+    r = subprocess.run([sys.executable, os.path.join(HERE, "honey_demo.py"), "serve", "--help"],
+                       capture_output=True, text=True)
+    for flag in ("--allowlist", "--allow-cidr", "--noise-budget", "--canaries",
+                 "--status-port", "--kpi-interval", "--allowlist-dry-run"):
+        check(f"serve --help 含 {flag}", flag in r.stdout)
+    bad_cli = os.path.join(cfgd, "cli-bad.yaml")
+    with open(bad_cli, "w", encoding="utf-8") as f:
+        f.write("version: 1\n" + base_rule.format(cidr="10.0.0.0/8", kind="scanner", note="x"))
+    r2 = subprocess.run([sys.executable, os.path.join(HERE, "honey_demo.py"), "serve",
+                         "--allowlist", bad_cli, "--allowlist-dry-run"],
+                        capture_output=True, text=True)
+    check("非法配置在 CLI 层硬失败（退出码 2 + 指出 rules[0]）",
+          r2.returncode == 2 and "rules[0]" in r2.stderr,
+          f"rc={r2.returncode}")
+    r3 = subprocess.run([sys.executable, os.path.join(HERE, "honey_demo.py"), "serve",
+                         "--allowlist", yml_path, "--allow-cidr", "203.0.113.9:scanner",
+                         "--allowlist-dry-run"], capture_output=True, text=True)
+    check("合法配置 dry-run 退出 0 并打印规则表",
+          r3.returncode == 0 and "配置校验通过" in r3.stdout and "规则 4 条" in r3.stdout,
+          f"rc={r3.returncode}")
 
     ok = all(results)
     print(f"\n{'=' * 62}\n{'PASS' if ok else 'FAIL'}  {sum(results)}/{len(results)} 项通过")

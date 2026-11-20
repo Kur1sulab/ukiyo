@@ -24,6 +24,7 @@ Thinkst 的运营基准是「数百个 canary ≈ 4 告警/年」——不是检
 """
 from __future__ import annotations
 
+import datetime as _dt
 import ipaddress
 import time
 from dataclasses import dataclass, field
@@ -52,14 +53,52 @@ class Rule:
     note: str
     ports: tuple[int, ...] | None = None      # None = 全部端口
     ua_like: str | None = None                # 可选的显式 UA 子串（不是启发式，是写死的）
+    expires_at: float | None = None           # epoch 秒；None = 永不过期
     _net: object = field(default=None, repr=False, compare=False)
 
     def covers(self, addr) -> bool:
         return addr in self._net
 
+    def expired(self, now: float | None = None) -> bool:
+        return self.expires_at is not None and self.expires_at <= (now or time.time())
+
+    def expires_iso(self) -> str | None:
+        if self.expires_at is None:
+            return None
+        return _dt.datetime.fromtimestamp(self.expires_at).isoformat(timespec="seconds")
+
     def to_dict(self) -> dict:
         return {"cidr": self.cidr, "kind": self.kind, "note": self.note,
-                "ports": list(self.ports) if self.ports else None, "ua_like": self.ua_like}
+                "ports": list(self.ports) if self.ports else None, "ua_like": self.ua_like,
+                "expires": self.expires_iso()}
+
+
+def parse_expiry(spec) -> float | None:
+    """过期时间：epoch 秒 / 'YYYY-MM-DD' / 'YYYY-MM-DDTHH:MM:SS'。
+
+    只写日期时按**当天 23:59:59 本地时间**算 —— 运维写「到 12-31 为止」的意思
+    是那天整天还放行，不是那天零点就断。
+    """
+    if spec is None or spec == "":
+        return None
+    if isinstance(spec, (int, float)) and not isinstance(spec, bool):
+        return float(spec)
+    s = str(spec).strip()
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    txt = s.replace("Z", "+00:00")
+    try:
+        d = _dt.datetime.fromisoformat(txt)
+    except ValueError as e:
+        raise AllowlistError(
+            f"过期时间 {spec!r} 无法解析：要 ISO 日期（2026-12-31）或 epoch 秒") from e
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=_dt.datetime.now().astimezone().tzinfo)
+    if len(txt) <= 10:      # 只有日期 → 当天结束
+        d = d.replace(hour=23, minute=59, second=59)
+    return d.timestamp()
 
 
 @dataclass(frozen=True)
@@ -117,10 +156,10 @@ class Allowlist:
     def __init__(self, bind_ip: str | None = None):
         self.rules: list[Rule] = []
         self.bind_ip = bind_ip
-        self.stats = {"checked": 0, "allowed": 0, "denied": 0}
+        self.stats = {"checked": 0, "allowed": 0, "denied": 0, "expired": 0}
 
     def add(self, cidr: str, kind: str, note: str, ports=None, ua_like: str | None = None,
-            allow_self: bool = False) -> Rule:
+            allow_self: bool = False, expires=None) -> Rule:
         if kind not in RULE_KINDS:
             raise AllowlistError(f"类目 {kind!r} 不在 {RULE_KINDS} 内：类目必须可解释")
         if not (note or "").strip():
@@ -142,7 +181,7 @@ class Allowlist:
                     f"{cidr!r} 覆盖蜜罐自己的监听地址 {self.bind_ip}："
                     f"同网段的攻击者会一起被静音。确需如此请显式传 allow_self=True")
         rule = Rule(cidr=str(net), kind=kind, note=note.strip(), ports=ports,
-                    ua_like=ua_like, _net=net)
+                    ua_like=ua_like, expires_at=parse_expiry(expires), _net=net)
         self.rules.append(rule)
         return rule
 
@@ -153,8 +192,14 @@ class Allowlist:
         except ValueError:
             self.stats["denied"] += 1
             return Decision(False, reason=f"来源 {ip!r} 不是合法 IP")
+        now = time.time()
         for r in self.rules:
             if r._net.version != a.version or not r.covers(a):
+                continue
+            if r.expired(now):
+                # 过期规则必须**当场失效**，不能只在加载时过滤：serve 是长跑进程，
+                # 加载时跳过等于「过期时间形同虚设」。
+                self.stats["expired"] = self.stats.get("expired", 0) + 1
                 continue
             if r.ports is not None and port is not None and int(port) not in r.ports:
                 continue
@@ -168,6 +213,20 @@ class Allowlist:
 
     def __len__(self) -> int:
         return len(self.rules)
+
+    def describe(self) -> list[str]:
+        """人类可读的规则表：运维上线前该能一眼读完这张表。"""
+        out = []
+        for i, r in enumerate(self.rules, 1):
+            bits = [f"{i:>2}. {r.cidr:<20} {r.kind:<8} {r.note}"]
+            if r.ports:
+                bits.append(f"ports={','.join(str(p) for p in r.ports)}")
+            if r.ua_like:
+                bits.append(f"ua~{r.ua_like}")
+            if r.expires_at is not None:
+                bits.append(("已过期 " if r.expired() else "到期 ") + (r.expires_iso() or ""))
+            out.append("  ".join(bits))
+        return out
 
     def to_dict(self) -> dict:
         return {"rules": [r.to_dict() for r in self.rules], "stats": dict(self.stats)}
@@ -248,9 +307,18 @@ class NoiseBudget:
         total = len(alerts) + len(noise)
         ratio = (len(noise) / total) if total else 0.0
 
+        # 本窗口的预算上限：全年预算按窗口折算，下限 1 条 ——
+        # 刚上线 1 小时的实例折算出来是 0.0001 条，任何一条告警都「超预算」，
+        # 那种数字只会训练运维忽略这条线。
+        window_budget = max(self.alerts_per_year * elapsed_years, 1.0)
+        window_over = len(alerts) > window_budget
+
         advice: list[str] = []
         if status == "OVER":
             advice.append("告警超预算：先审 token 放置（是否在合法流量必经路径上），不要关告警")
+        elif window_over:
+            advice.append(f"本窗口告警 {len(alerts)} 已超预算上限 {window_budget:.1f}："
+                          f"先审 token 放置（是否在合法流量必经路径上），不要关告警")
         if dev > 3.0:
             advice.append(f"噪声 {noise_per_day:.1f}/天 ≈ 基线 {self.baseline_noise_per_day:.1f}"
                           f" 的 {dev:.1f}×：蜜标位置可能已被索引/扫描器收录")
@@ -267,6 +335,9 @@ class NoiseBudget:
             "reliable": reliable,
             "alerts": len(alerts), "distinct_tokens": len(tokens),
             "noise": len(noise), "allowlisted": len(allow),
+            "window_alerts": len(alerts),
+            "window_budget": round(window_budget, 2),
+            "window_over": window_over,
             "projected_alerts_per_year": round(projected, 2),
             "budget_alerts_per_year": self.alerts_per_year,
             "budget_status": status,
@@ -282,4 +353,16 @@ class NoiseBudget:
         return (f"KPI {r['budget_status']}　告警 {r['alerts']}（投影 "
                 f"{r['projected_alerts_per_year']}/年 vs 预算 {r['budget_alerts_per_year']}）"
                 f"　噪声 {r['noise']}（{r['noise_per_day']}/天，基线 "
-                f"{r['baseline_noise_per_day']}）　放行 {r['allowlisted']}")
+                f"{r['baseline_noise_per_day']}）　放行事件 {r['allowlisted']}")
+
+    def budget_line(self, now: float | None = None) -> str:
+        """运维最需要的一行：本窗口告警数 / 预算上限，超了直接给动作。"""
+        r = self.report(now)
+        head = (f"本窗口告警 {r['window_alerts']} / 预算上限 {r['window_budget']:.1f}"
+                f"（全年预算 {r['budget_alerts_per_year']}，窗口 {r['window_days']} 天，"
+                f"状态 {r['budget_status']}）")
+        if r["window_over"] or r["budget_status"] == "OVER":
+            # 数字已经在上一行了，这里只给动作 —— 超预算时要审 token 放置，
+            # 不是把告警关掉（关掉之后归因链就断了，蜜罐等于没开）。
+            return head + "\n  建议：先审 token 放置（是否在合法流量必经路径上），不要关告警"
+        return head
