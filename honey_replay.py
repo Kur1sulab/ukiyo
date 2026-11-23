@@ -43,7 +43,7 @@ UI_DIR = os.path.join(HERE, "replay_ui")
 BIND = "127.0.0.1"          # 硬约束：仅回环。蜜罐数据不出本机。
 DEFAULT_PORT = 18099        # 避开 18080（在跑容器）/18090/18094（靶场）
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 PRODUCT = "浮世 Ukiyo · 诱捕回放"
 
 # 只读引用蜜罐本体的符号（不修改其行为）：
@@ -51,6 +51,7 @@ PRODUCT = "浮世 Ukiyo · 诱捕回放"
 sys.path.insert(0, HERE)
 from honey_state import LADDER, Session            # noqa: E402
 from honey_demo import server_verdict              # noqa: E402
+import honey_bait_arch as hba                      # noqa: E402
 
 # 非账本的 jsonl（压测副产物），扫描 run 目录时排除
 NON_LEDGER = {"client_requests.jsonl", "ledger_write_times.jsonl",
@@ -445,6 +446,10 @@ def session_summary(run: dict, sid: str, mine: list[dict]) -> dict:
     top = max(scored, key=lambda e: e["score"]) if scored else {}
     ladder, depth, _ = rebuild_ladder(mine)
     verdict = replay_verdict(run["events"], sid)
+    # 架构轴（调研总纲 §5 P1）：verdict 回答「这一场怎么结束的」，
+    # deception 回答「我们用了哪种欺骗、对方有没有被内容推动」。
+    # 两者正交，合流标签 = 终止策略 · 架构 · 采纳状态。
+    deception = hba.classify_session(run["events"], sid, verdict)
     snap = run["snapshot"].get(sid)
     leaked = next((_ident_of(e) for e in mine
                    if e.get("kind") == "canary" and _ident_of(e)), {})
@@ -457,6 +462,11 @@ def session_summary(run: dict, sid: str, mine: list[dict]) -> dict:
         "depth": depth, "flags": sorted(l["flag"] for l in ladder
                                         if l["unlocked"]),
         "verdict": verdict,
+        "deception": deception,
+        "arch": deception["arch"],
+        "arch_adopted": deception["adopted"],
+        "arch_label": deception["label"],
+        "planner": deception["planner"],
         "verdict_live": snap.get("verdict") if snap else None,
         "verdict_match": (snap is None or snap.get("verdict") == verdict),
         "authed_as": snap.get("authed_as") if snap else None,
@@ -511,8 +521,13 @@ def run_stats(run: dict) -> dict:
         dist[s["verdict"]] = dist.get(s["verdict"], 0) + 1
     allow_req = sum(int(e.get("n") or 1) for e in run["events"]
                     if e.get("kind") == "allowlist")
+    profiles = [s["deception"] for s in sums]
     return {"id": run["id"], "n_events": len(run["events"]),
             "n_sessions": len(sums), "verdicts": dist,
+            # 架构分类（总纲 §5 P1）：按「陈述式事实注入 / 前置条件式路径注入」
+            # 分别记投递数与采纳数；arch_verdicts 是 终止策略·架构·采纳 的合流表。
+            "architectures": hba.aggregate(profiles),
+            "arch_verdicts": hba.verdict_architecture(profiles),
             "allowlisted_requests": allow_req,
             "max_depth": max([s["depth"] for s in sums] or [0]),
             "t0": run["events"][0].get("t") if run["events"] else None,

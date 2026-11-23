@@ -38,6 +38,7 @@ import urllib.request
 
 from honey_server import Honeypot, _free_port
 from honey_world import World
+import honey_bait_arch
 import honey_allowlist_config as allowlist_config
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -369,6 +370,16 @@ def server_verdict(hp: Honeypot, s) -> str:
     if s.depth >= 3:
         return "DISENGAGED(after-findings)"
     return "DISENGAGED"
+
+
+def deception_verdict(hp: Honeypot, s) -> dict:
+    """活体侧的架构分类（总纲 §5 P1）：终止策略 + 架构 + 对方是否采纳。
+
+    只读账本，和回放侧共用 honey_bait_arch.classify_session —— 同一份证据
+    在进程重启前后必须得出同一个结论，不能一边看内存一边看磁盘。
+    """
+    return honey_bait_arch.classify_session(hp.ledger.events, s.id,
+                                            server_verdict(hp, s))
 
 
 def run_case(mode: str, name: str, run_dir: str, human: bool = False) -> dict:

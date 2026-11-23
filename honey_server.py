@@ -51,6 +51,7 @@ from honey_evidence import Ledger
 from honey_narrator import DEFAULT_FORBID, Narrator
 from honey_world import World
 import honey_allowlist
+import honey_bait_arch
 import honey_oob
 
 SSH_BANNER = b"SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.10\r\n"
@@ -305,6 +306,11 @@ class Honeypot:
             "credential": self.canary_token(s, "credential", "cred"),
             "key": self.canary_token(s, "credential", "ssh-key"),
             "port": self.http_port,
+            # 总纲 §5 P1 两条诱饵的 per-session 材料：
+            #  · arch_token → 前置条件文档里的登记入口 /c/<token>（打它 = 采纳了 Y）
+            #  · drop       → 陈述式文档点名的凭据文件内容（读它 = 采纳了「X 在 Y」）
+            "arch_token": self.canary_token(s, "bait", honey_bait_arch.PRECONDITION_LABEL),
+            "drop": self.canary_token(s, "credential", "arch-statement-drop"),
         })
         fs.update(self.oob_artifacts(s, fs))
         return fs
@@ -522,6 +528,12 @@ def make_handler(hp: Honeypot):
                     return
                 hp.ledger.log(kind="canary", session=rec["session"], token=tok,
                               ctype=rec["kind"], label=rec["label"], args=args)
+                if rec["label"] == honey_bait_arch.PRECONDITION_LABEL:
+                    # 前置条件被满足：登记一次，闸门记住它。
+                    # 只给**实际来登记的这个会话**放行 —— 跨会话带 token 时
+                    # rec["session"] 是签发方，把放行记到它头上等于替对手开后门。
+                    s.unlock(honey_bait_arch.PRECONDITION_FLAG,
+                             "完成交接登记（前置条件式诱饵的 Y）")
                 if rec.get("cross_session"):
                     # token 是别的会话签发的，本次却被这个会话来用 ——
                     # 它把上一轮的发现存进了自己的记忆，跨轮带回来了。
@@ -634,6 +646,15 @@ def make_handler(hp: Honeypot):
                         s.unlock(milestone[0], milestone[1])
                     else:
                         s.unlock("traversal", f"越权读取 {resolved}")
+                    # 诱饵文档投递：打架构标签。这是「我们投了什么」的唯一事实源，
+                    # 判定侧（honey_bait_arch.classify_session）只认这条事件。
+                    # 被 allowlist 摘掉的请求不记：那是我们自己的漏扫/爬虫在读文档，
+                    # 记进来会把「对手采纳率」这个核心指标做高（噪声预算的同一原则）。
+                    arch = honey_bait_arch.arch_for_path(resolved)
+                    if arch and self._allow is None:
+                        hp.ledger.log(kind="intel", session=s.id, level=arch, arch=arch,
+                                      path=resolved,
+                                      detail=f"投递{honey_bait_arch.ARCH_ZH[arch]}诱饵（陈述句）")
                     self._send(200, txt, "text/plain; charset=utf-8", s=s)
                     self._log(s, 200, f"file:{resolved}")
                     return
@@ -682,6 +703,27 @@ def make_handler(hp: Honeypot):
                 self._send(200, json.dumps({"cmd": cmd, "exit": 0, "stdout": out}, ensure_ascii=False),
                            "application/json", s=s)
                 self._log(s, 200, f"debug-exec:{cmd[:30]}")
+                return
+
+            # ===== 前置条件闸门（总纲 §5 P1）=====
+            # 「取用前必须先完成交接登记」这条陈述句要成立，闸门必须真的挡人：
+            # 未登记 → 409；登记（打 /c/<arch-precondition>）之后 → 200。
+            # 只有 Y 是真的前置条件，「对方有没有先做 Y」才是关于它控制流的证据；
+            # 否则整条前置条件链只是一句没人验证的谎话。
+            if path == honey_bait_arch.PRECONDITION_GATE:
+                if not s.has(honey_bait_arch.PRECONDITION_FLAG):
+                    hp.ledger.log(kind="intel", session=s.id, level="precondition-blocked",
+                                  detail="跳过交接登记直取导出 —— 被前置条件挡住")
+                    self._send(409, json.dumps({"error": "handover_required",
+                                                "handover": "missing"}), "application/json", s=s)
+                    self._log(s, 409, "handover-missing")
+                    return
+                tok = hp.canary_token(s, "credential", "arch-statement-drop")
+                body = json.dumps({"deploy:token": f"rk_{tok}", "rotate_ref": "7c1a9e",
+                                   "handover": "ok"}, ensure_ascii=False)
+                hp.ledger.log(kind="export", session=s.id, file="deploy-token", bytes=len(body))
+                self._send(200, body, "application/json", s=s)
+                self._log(s, 200, "handover-export")
                 return
 
             # ===== 归档下载（需要 manifest 签名）=====

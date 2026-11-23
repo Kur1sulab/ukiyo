@@ -27,6 +27,21 @@ import threading
 import time
 
 # ======================================================================
+# RESP 解析上限（Redis 段用）
+#
+# 蜜罐是**对外**服务，读多少字节由对手决定。真 Redis 对 multibulk 长度与
+# 单个 bulk 都有上限，超了回 -ERR 再关连接；我们照同样的错误文本，但把
+# multibulk 收紧到 1024 —— 这里所有命令都只有几个参数，而 `*2000000000`
+# 会让一个线程在 readline 上空转几十分钟（每个参数都要等 8s 超时）。
+# ======================================================================
+MAX_ARGS = 1024
+MAX_BULK = 4 << 20        # 4 MiB：本蜜罐最大的值是 INFO 正文（几百字节）
+
+
+class _ProtoError(Exception):
+    """RESP 语法错误。真 Redis 回一条 `-ERR Protocol error: …` 再关连接。"""
+
+# ======================================================================
 # SSH：banner + KEXINIT（OpenSSH 8.9p1 / Ubuntu 22.04 的真实算法表）
 # ======================================================================
 SSH_KEX = ("curve25519-sha256,curve25519-sha256@libssh.org,"
@@ -251,7 +266,11 @@ class ProtoFarm:
         w = conn.makefile("wb")
 
         def read_cmd():
-            """真客户端（redis-cli / redis-py）发 RESP 数组；也兼容 inline telnet。"""
+            """真客户端（redis-cli / redis-py）发 RESP 数组；也兼容 inline telnet。
+
+            返回 None = EOF；返回 [] = 空 inline 行（调用方必须忽略，见主循环）；
+            返回 list = 一条命令。
+            """
             line = io.readline()
             if os.environ.get("HONEY_DEBUG"):
                 print(f"    [srv] line={line!r}", flush=True)
@@ -261,27 +280,48 @@ class ProtoFarm:
                 try:
                     n = int(line[1:].strip())
                 except ValueError:
-                    return None
+                    raise _ProtoError("invalid multibulk length")
+                # 上限对齐真 Redis 的错误行为，但收紧到 1024：蜜罐的命令都只有
+                # 几个参数，放任 `*2000000000` 会让一个线程在这里空转几十分钟。
+                if n < 0 or n > MAX_ARGS:
+                    raise _ProtoError("invalid multibulk length")
                 args = []
-                for _ in range(max(n, 0)):
+                for _ in range(n):
                     hdr = io.readline()
                     if os.environ.get("HONEY_DEBUG"):
                         print(f"    [srv] hdr={hdr!r}", flush=True)
                     if not hdr or hdr[:1] != b"$":
-                        return None
+                        raise _ProtoError("expected '$', got something else")
                     try:
                         ln = int(hdr[1:].strip())
                     except ValueError:
-                        return None
+                        raise _ProtoError("invalid bulk length")
+                    if ln > MAX_BULK:
+                        raise _ProtoError("invalid bulk length")
                     args.append(io.read_exact(ln) if ln >= 0 else b"")
                     io.drop2()                     # 吃掉尾部 \r\n
                 return args
             return line.strip().split()
 
         while not self._stop.is_set():
-            parts = read_cmd()
-            if not parts:
+            try:
+                parts = read_cmd()
+            except _ProtoError as e:
+                # 对齐真 Redis：语法错回一条 -ERR 再关连接，而不是静默断开。
+                try:
+                    w.write(b"-ERR Protocol error: " + str(e).encode() + b"\r\n")
+                    w.flush()
+                except OSError:
+                    pass
                 break
+            if parts is None:                      # EOF / 对端关闭
+                break
+            if not parts:
+                # 空 inline 行：真 Redis 直接忽略（不回包、不断连）。这里以前
+                # 和 EOF 一起 break，等于给对手一个指纹——`printf '\r\n' | nc`
+                # 打真 Redis 连接还在，打我们立刻断。客户端多发一个尾部 CRLF
+                # 也会因此被误判成断连（_selftest_proto 的 ConnectionReset 就是它）。
+                continue
             cmd = parts[0].upper().decode("latin-1", "replace")
             self._hit("redis", addr, cmd)
             if cmd == "PING":
@@ -303,13 +343,19 @@ class ProtoFarm:
                 if cmd == "KEYS":
                     out = b"*" + str(len(keys)).encode() + b"\r\n"
                     for k in keys:
-                        out += b"$" + str(len(k)).encode() + b"\r\n" + k.encode() + b"\r\n"
+                        kb = k.encode()
+                        out += b"$" + str(len(kb)).encode() + b"\r\n" + kb + b"\r\n"
                     w.write(out)
                 else:
-                    arr = [b"0"] + [k.encode() for k in keys]
-                    w.write(b"*2\r\n*2\r\n$1\r\n0\r\n*" + str(len(keys)).encode() + b"\r\n"
-                            + b"".join(b"$" + str(len(k)).encode() + b"\r\n" + k + b"\r\n"
-                                       for k in arr[1:]))
+                    # 真 Redis 的 SCAN 回复是 `*2` → [ 游标(bulk string), 键数组 ]。
+                    # 旧实现写成 `*2\r\n*2\r\n$1\r\n0\r\n*6…`：游标外面多套了一层
+                    # 数组，外层只剩一个元素；严格客户端读到第二个元素时永远等不到
+                    # 字节（_selftest_proto 的严格解析器在这里 timeout 就是证据）。
+                    out = b"*2\r\n$1\r\n0\r\n*" + str(len(keys)).encode() + b"\r\n"
+                    for k in keys:
+                        kb = k.encode()
+                        out += b"$" + str(len(kb)).encode() + b"\r\n" + kb + b"\r\n"
+                    w.write(out)
             elif cmd == "GET" and len(parts) > 1:
                 k = parts[1].decode("latin-1", "replace")
                 if k in db:
@@ -350,7 +396,10 @@ class ProtoFarm:
                         "build_snapshot": False, "lucene_version": "9.8.0",
                         "minimum_wire_compatibility_version": "7.17.0",
                         "minimum_index_compatibility_version": "7.0.0"},
-            "tagline": "You Know, for Search"},
+            "tagline": "You Know, for Search"}
+        # 注意：这个字典原来结尾多了一个逗号 → 变成 1 元 tuple →
+        # json.dumps 输出 `[{…}]`。真 Elasticsearch 的 GET / 返回**裸对象**，
+        # 数组包一层是立刻可辨的假货（nmap/curl 一眼看出）。
         body = json.dumps(info).encode()
         req = b""
         try:
